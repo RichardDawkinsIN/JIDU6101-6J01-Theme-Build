@@ -1,0 +1,118 @@
+name: Full Build (OpenWrt + ImmortalWrt, JIDU6101 + JIDU6J01)
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *" # 12:00 AM UTC (~5:30 AM IST)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - firmware: openwrt
+            script: openwrt.sh
+            device: jidu6101
+            config: configs/.config-jidu6101
+          - firmware: openwrt
+            script: openwrt.sh
+            device: jidu6j01
+            config: configs/.config-jidu6j01
+          - firmware: immortalwrt
+            script: immortalwrt.sh
+            device: jidu6101
+            config: configs/.config-jidu6101
+          - firmware: immortalwrt
+            script: immortalwrt.sh
+            device: jidu6j01
+            config: configs/.config-jidu6j01
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/share/boost
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Extract repo zip
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No .zip file found in repo root."
+            exit 1
+          fi
+          echo "Found zip: $ZIP_FILE"
+          unzip -o "$ZIP_FILE" -d extracted
+          EXTRACT_DIR=$(unzip -Z1 "$ZIP_FILE" | head -n 1 | cut -d/ -f1)
+          echo "EXTRACT_DIR=extracted/$EXTRACT_DIR" >> "$GITHUB_ENV"
+
+      - name: Run build script
+        run: |
+          cd "$EXTRACT_DIR"
+          chmod +x "${{ matrix.script }}"
+          export DEVICE_CONFIG="${{ matrix.config }}"
+          bash "${{ matrix.script }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.firmware }}-${{ matrix.device }}
+          path: |
+            ${{ env.EXTRACT_DIR }}/${{ matrix.firmware }}/bin/targets/mediatek/filogic/*.bin
+            ${{ env.EXTRACT_DIR }}/${{ matrix.firmware }}/bin/targets/mediatek/filogic/*.ubi
+            ${{ env.EXTRACT_DIR }}/${{ matrix.firmware }}/bin/targets/mediatek/filogic/sha256sums
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - firmware: openwrt
+            device: jidu6101
+          - firmware: openwrt
+            device: jidu6j01
+          - firmware: immortalwrt
+            device: jidu6101
+          - firmware: immortalwrt
+            device: jidu6j01
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.firmware }}-${{ matrix.device }}
+          path: artifacts
+
+      - name: Delete old release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ${{ matrix.firmware }}-${{ matrix.device }} --yes --cleanup-tag || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.firmware }}-${{ matrix.device }}
+          name: "${{ matrix.firmware }} (Latest) - ${{ matrix.device }}"
+          files: artifacts/**/*
+          make_latest: false
+          body: "Automatically built ${{ matrix.firmware }} firmware for ${{ matrix.device }}. This release is replaced by each new build."
